@@ -1,0 +1,653 @@
+@page "/bridge"
+@implements IDisposable
+@layout EmptyLayout
+@using PKHeX.Facade
+@using PKHeX.Facade.Extensions
+@using PKHeX.Facade.Pokemons
+@using System.Text.Json
+@using System.Text.Json.Serialization
+@using Microsoft.JSInterop
+@using PKHeX.Facade.Repositories
+@using PKHeX.Web.Plugins
+@using PKHeX.Web.Services.Plugins
+@inject IJSRuntime Js
+@inject GameService GameService
+@inject PlugInRegistry PlugInRegistry
+@inject PlugInRuntime PlugInRuntime
+@inject PlugInService PlugInService
+@inject PlugInSourceService PlugInSourceService
+@inject PlugInLocalStorage PlugInLocalStorage
+@inject PlugInPageRegistry PlugInPageRegistry
+
+<div class="bridge-shell @(_page is null ? string.Empty : "bridge-shell--active")">
+    @if (_page is not null)
+    {
+        @if (_page.Layout == Outcome.PlugInPage.PageLayout.Standard)
+        {
+            <div class="bridge-standard-shell">
+                @if (_page.PageHeader is not null)
+                {
+                    <header class="bridge-page-header">
+                        <div>
+                            <div class="bridge-page-eyebrow">Plug-in</div>
+                            <h1>@_page.PageHeader.Title</h1>
+                        </div>
+
+                        @if (_page.PageHeader.ComponentType is not null)
+                        {
+                            <DynamicComponent Type="_page.PageHeader.ComponentType" Parameters="@AssembleComponentParams()" />
+                        }
+                    </header>
+                }
+
+                <section class="bridge-page-body">
+                    <DynamicComponent Type="_page.ComponentType" Parameters="@AssembleComponentParams()" />
+                </section>
+            </div>
+        }
+        else
+        {
+            <div class="bridge-empty-shell">
+                <DynamicComponent Type="_page.ComponentType" Parameters="@AssembleComponentParams()" />
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private DotNetObjectReference<Bridge>? _reference;
+    private Outcome.PlugInPage? _page;
+    private LoadedPlugIn? _plugIn;
+
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+
+        _reference = DotNetObjectReference.Create(this);
+        await Js.InvokeVoidAsync("pkhexBridge.initialize", _reference);
+    }
+
+    [JSInvokable]
+    public async Task<string> HandleRequest(string json)
+    {
+        try
+        {
+            var request = JsonSerializer.Deserialize<BridgeRequest>(json, JsonOptions)
+                          ?? throw new InvalidOperationException("Invalid bridge request.");
+
+            var data = await (request.Command switch
+            {
+                "getState" => GetState(),
+                "loadSave" => LoadSave(request.Payload),
+                "updateTrainer" => UpdateTrainer(request.Payload),
+                "exportSave" => ExportSave(),
+                "getCollection" => GetCollection(request.Payload),
+                "getPokemon" => GetPokemon(request.Payload),
+                "exportPokemon" => ExportPokemon(request.Payload),
+                "getItems" => GetItems(),
+                "setItemCount" => SetItemCount(request.Payload),
+                "getPluginFailures" => GetPluginFailures(),
+                "getPlugins" => GetPlugins(),
+                "getPlugin" => GetPlugin(request.Payload),
+                "installPlugin" => InstallPlugin(request.Payload),
+                "uninstallPlugin" => UninstallPlugin(request.Payload),
+                "updatePlugin" => UpdatePlugin(request.Payload),
+                "setPluginEnabled" => SetPluginEnabled(request.Payload),
+                "setHookEnabled" => SetHookEnabled(request.Payload),
+                "setPluginSetting" => SetPluginSetting(request.Payload),
+                "runQuickAction" => RunQuickAction(request.Payload),
+                "showPluginPage" => ShowPluginPage(request.Payload),
+                "clearPluginPage" => ClearPluginPage(),
+                _ => throw new NotSupportedException($"Unknown bridge command '{request.Command}'.")
+            });
+
+            return JsonSerializer.Serialize(new BridgeResponse(true, data, null), JsonOptions);
+        }
+        catch (Exception e)
+        {
+            return JsonSerializer.Serialize(new BridgeResponse(false, null, e.Message), JsonOptions);
+        }
+    }
+
+    private Task<object> GetState()
+    {
+        var game = GameService.Game;
+        return Task.FromResult<object>(new
+        {
+            loaded = GameService.IsLoaded,
+            fileName = GameService.FileName,
+            gameVersion = game?.SaveVersion.Name,
+            trainer = game is null
+                ? null
+                : new
+                {
+                    id = game.Trainer.Id.ToString(),
+                    name = game.Trainer.Name,
+                    rivalName = game.Trainer.RivalName,
+                    money = game.Trainer.Money.Amount,
+                    gender = game.Trainer.Gender.Name,
+                    genderSymbol = game.Trainer.Gender.Symbol,
+                },
+            quickActions = PlugInRegistry.GetAllEnabledHooks<IQuickAction>()
+                .Select(a => new
+                {
+                    pluginId = PlugInRegistry.GetPlugInOwningHook(a).Id,
+                    hookType = a.GetType().FullName,
+                    label = a.Label,
+                    description = a.Description,
+                    disabled = a.DisabledInfo.Disabled,
+                    reason = a.DisabledInfo.Reason,
+                })
+                .ToList(),
+        });
+    }
+
+    private Task<object> LoadSave(JsonElement payload)
+    {
+        var fileName = payload.GetProperty("fileName").GetString() ?? "save.sav";
+        var base64 = payload.GetProperty("base64").GetString() ?? string.Empty;
+        var bytes = Convert.FromBase64String(base64);
+
+        GameService.Load(bytes, fileName);
+        return GetState();
+    }
+
+    private Task<object> UpdateTrainer(JsonElement payload)
+    {
+        var game = GameService.LoadedGame;
+        if (payload.TryGetProperty("money", out var money) && money.ValueKind == JsonValueKind.Number)
+        {
+            game.Trainer.Money.Set(money.GetUInt32());
+        }
+
+        if (payload.TryGetProperty("gender", out var gender) && gender.ValueKind == JsonValueKind.String)
+        {
+            game.Trainer.Gender = gender.GetString() switch
+            {
+                nameof(Gender.Female) or "Female" => Gender.Female,
+                nameof(Gender.Genderless) or "Genderless" => Gender.Genderless,
+                _ => Gender.Male,
+            };
+        }
+
+        return GetState();
+    }
+
+    private Task<object> ExportSave()
+    {
+        using var stream = GameService.Export();
+        using var memory = new MemoryStream();
+        stream.CopyTo(memory);
+
+        return Task.FromResult<object>(new
+        {
+            fileName = GameService.FileName ?? "save.sav",
+            base64 = Convert.ToBase64String(memory.ToArray()),
+        });
+    }
+
+    private Task<object> GetCollection(JsonElement payload)
+    {
+        var source = payload.GetProperty("source").GetString() ?? throw new InvalidOperationException("Missing source.");
+        var game = GameService.LoadedGame;
+        var pokemon = source switch
+        {
+            "party" => game.Trainer.Party.Pokemons,
+            "box" => game.Trainer.PokemonBox.All.Where(p => p.Species.Species != PKHeX.Core.Species.None).ToList(),
+            _ => throw new NotSupportedException($"Collection '{source}' is not supported.")
+        };
+
+        return Task.FromResult<object>(new
+        {
+            source,
+            entries = pokemon.Select(SerializePokemonSummary).ToList(),
+            showdown = pokemon.Showdown(),
+        });
+    }
+
+    private Task<object> GetPokemon(JsonElement payload)
+    {
+        var source = payload.GetProperty("source").GetString() ?? throw new InvalidOperationException("Missing source.");
+        var uniqueId = UniqueId.From(payload.GetProperty("uniqueId").GetString() ?? throw new InvalidOperationException("Missing pokemon id."));
+        var game = GameService.LoadedGame;
+
+        var pokemon = source switch
+        {
+            "party" => game.Trainer.Party.Pokemons.FirstOrDefault(p => p.UniqueId.Equals(uniqueId)),
+            "box" => game.Trainer.PokemonBox.All.FirstOrDefault(p => p.UniqueId.Equals(uniqueId)),
+            _ => throw new NotSupportedException($"Collection '{source}' is not supported.")
+        } ?? throw new KeyNotFoundException("Pokemon not found.");
+
+        return Task.FromResult<object>(new
+        {
+            source,
+            pokemon = new
+            {
+                uniqueId = pokemon.UniqueId.ToString(),
+                species = pokemon.Species.Name,
+                nickname = pokemon.Nickname,
+                displayName = pokemon.NameDisplay(),
+                level = pokemon.Level,
+                shiny = pokemon.IsShiny,
+                gender = pokemon.Gender.Name,
+                friendship = pokemon.Friendship,
+                heldItem = pokemon.HeldItem.Name,
+                ability = pokemon.Ability.Name,
+                nature = pokemon.Natures.ToString(),
+                gameVersion = pokemon.Version.Name,
+                form = pokemon.Form.Form.Name,
+                showdown = pokemon.Showdown(),
+                moves = pokemon.Moves.Select(m => new
+                {
+                    slot = m.Key.ToString(),
+                    name = m.Value.Move.Name,
+                    pp = m.Value.PP.Current,
+                    maxPp = m.Value.PP.Max,
+                }).ToList(),
+                stats = new
+                {
+                    hp = pokemon.BaseStats.Health,
+                    atk = pokemon.BaseStats.Attack,
+                    def = pokemon.BaseStats.Defense,
+                    spa = pokemon.BaseStats.SpecialAttack,
+                    spd = pokemon.BaseStats.SpecialDefense,
+                    spe = pokemon.BaseStats.Speed,
+                },
+                evs = SerializeStats(pokemon.EVs),
+                ivs = SerializeStats(pokemon.IVs),
+            }
+        });
+    }
+
+    private Task<object> ExportPokemon(JsonElement payload)
+    {
+        var uniqueId = UniqueId.From(payload.GetProperty("uniqueId").GetString() ?? throw new InvalidOperationException("Missing pokemon id."));
+        var pokemon = GameService.LoadedGame.FindPokemon(uniqueId) ?? throw new KeyNotFoundException("Pokemon not found.");
+        var file = pokemon.ToFile();
+
+        return Task.FromResult<object>(new
+        {
+            fileName = file.Name,
+            base64 = Convert.ToBase64String(file.Bytes),
+        });
+    }
+
+    private Task<object> GetItems()
+    {
+        var inventories = GameService.LoadedGame.Trainer.Inventories;
+        return Task.FromResult<object>(new
+        {
+            inventoryTypes = inventories.InventoryTypes.OrderBy(t => t).ToArray(),
+            inventories = inventories.InventoryTypes.OrderBy(t => t).Select(type => new
+            {
+                type,
+                maxItemCountAllowed = inventories[type].MaxItemCountAllowed,
+                items = inventories[type].Where(i => !i.IsNone).Select(item => new
+                {
+                    id = item.Id,
+                    name = item.Name,
+                    count = item.Count,
+                }).ToList()
+            }).ToList()
+        });
+    }
+
+    private Task<object> SetItemCount(JsonElement payload)
+    {
+        var inventoryType = payload.GetProperty("inventoryType").GetString() ?? throw new InvalidOperationException("Missing inventory type.");
+        var itemId = payload.GetProperty("itemId").GetUInt16();
+        var count = payload.GetProperty("count").GetUInt32();
+        var inventory = GameService.LoadedGame.Trainer.Inventories[inventoryType];
+
+        if (count == 0)
+            inventory.Remove(itemId);
+        else
+            inventory.Set(itemId, count);
+
+        return GetItems();
+    }
+
+    private Task<object> GetPluginFailures()
+    {
+        return Task.FromResult<object>(new
+        {
+            failures = PlugInRuntime.RecentFailures.Select(f => new
+            {
+                pluginId = f.PlugIn.Id,
+                message = f.Exception.Message,
+                stackTrace = f.Exception.StackTrace,
+            }).ToList()
+        });
+    }
+
+    private async Task<object> GetPlugins()
+    {
+        var sources = await PlugInSourceService.GetPlugInSources();
+        var installed = PlugInRegistry.GetAllPlugins()
+            .Select(SerializePluginSummary)
+            .ToList();
+
+        var available = sources
+            .SelectMany(source => source.PlugIns.Select(plugin => new { source, plugin }))
+            .Where(entry => !PlugInRegistry.IsRegistered(entry.plugin.Id))
+            .Select(entry => new
+            {
+                sourceUrl = entry.source.SourceUrl,
+                sourceName = entry.source.Name,
+                id = entry.plugin.Id,
+                name = entry.plugin.Name,
+                description = entry.plugin.Description,
+                projectUrl = entry.plugin.ProjectUrl,
+                version = entry.plugin.PublishedVersions.LastOrDefault(),
+                downloadUrl = entry.source.GetLatestDownloadUrl(entry.plugin),
+            })
+            .ToList();
+
+        return new { installed, available };
+    }
+
+    private Task<object> GetPlugin(JsonElement payload)
+    {
+        var pluginId = payload.GetProperty("pluginId").GetString()
+                       ?? throw new InvalidOperationException("Missing plugin id.");
+        var plugin = PlugInRegistry.GetBy(pluginId);
+
+        var hooks = PlugInRegistry.GetAllHooksOf(plugin)
+            .Select(hook => new
+            {
+                type = hook.GetType().FullName,
+                name = hook.GetType().Name,
+                description = hook.Description,
+                kind = HookKind(hook),
+                enabled = plugin.IsHookEnabled(hook),
+            })
+            .ToList();
+
+        var settings = plugin.Settings.All
+            .Select(pair => SerializeSetting(pair.Key, pair.Value))
+            .ToList();
+
+        return Task.FromResult<object>(new
+        {
+            plugin = SerializePluginSummary(plugin),
+            hooks,
+            settings,
+        });
+    }
+
+    private async Task<object> InstallPlugin(JsonElement payload)
+    {
+        var sourceUrl = payload.GetProperty("sourceUrl").GetString()
+                        ?? throw new InvalidOperationException("Missing source url.");
+        var downloadUrl = payload.GetProperty("downloadUrl").GetString()
+                          ?? throw new InvalidOperationException("Missing download url.");
+
+        await PlugInService.InstallFrom(sourceUrl, downloadUrl);
+        return await GetPlugins();
+    }
+
+    private async Task<object> UninstallPlugin(JsonElement payload)
+    {
+        var plugin = PlugInRegistry.GetBy(payload.GetProperty("pluginId").GetString()!);
+        await PlugInService.Uninstall(plugin);
+        return await GetPlugins();
+    }
+
+    private async Task<object> UpdatePlugin(JsonElement payload)
+    {
+        var plugin = PlugInRegistry.GetBy(payload.GetProperty("pluginId").GetString()!);
+        await PlugInService.Update(plugin);
+        return await GetPlugin(payload);
+    }
+
+    private async Task<object> SetPluginEnabled(JsonElement payload)
+    {
+        var plugin = PlugInRegistry.GetBy(payload.GetProperty("pluginId").GetString()!);
+        plugin.Enabled = payload.GetProperty("enabled").GetBoolean();
+        await PlugInLocalStorage.Persist(plugin);
+        return await GetPlugin(payload);
+    }
+
+    private async Task<object> SetHookEnabled(JsonElement payload)
+    {
+        var plugin = PlugInRegistry.GetBy(payload.GetProperty("pluginId").GetString()!);
+        var hookType = payload.GetProperty("hookType").GetString()
+                       ?? throw new InvalidOperationException("Missing hook type.");
+
+        plugin.SetToggle(hookType, payload.GetProperty("enabled").GetBoolean());
+        await PlugInLocalStorage.Persist(plugin);
+        return await GetPlugin(payload);
+    }
+
+    private async Task<object> SetPluginSetting(JsonElement payload)
+    {
+        var plugin = PlugInRegistry.GetBy(payload.GetProperty("pluginId").GetString()!);
+        var key = payload.GetProperty("key").GetString() ?? throw new InvalidOperationException("Missing setting key.");
+        var kind = payload.GetProperty("kind").GetString() ?? throw new InvalidOperationException("Missing setting kind.");
+
+        plugin.Settings[key] = kind switch
+        {
+            "string" => new Settings.SettingValue.StringValue(payload.GetProperty("value").GetString() ?? string.Empty),
+            "boolean" => new Settings.SettingValue.BooleanValue(payload.GetProperty("value").GetBoolean()),
+            "integer" => new Settings.SettingValue.IntegerValue(payload.GetProperty("value").GetInt32()),
+            "file" => new Settings.SettingValue.FileValue(
+                Convert.FromBase64String(payload.GetProperty("base64").GetString() ?? string.Empty),
+                payload.GetProperty("fileName").GetString() ?? string.Empty),
+            _ => throw new NotSupportedException($"Unsupported setting kind '{kind}'.")
+        };
+
+        await PlugInLocalStorage.Persist(plugin);
+        return await GetPlugin(payload);
+    }
+
+    private async Task<object> RunQuickAction(JsonElement payload)
+    {
+        var plugin = PlugInRegistry.GetBy(payload.GetProperty("pluginId").GetString()!);
+        var hookType = payload.GetProperty("hookType").GetString()
+                       ?? throw new InvalidOperationException("Missing hook type.");
+        var action = PlugInRegistry.GetAllHooksOf(plugin)
+            .OfType<IQuickAction>()
+            .FirstOrDefault(a => a.GetType().FullName == hookType)
+            ?? throw new InvalidOperationException($"Could not find quick action '{hookType}'.");
+
+        var outcome = await action.OnActionRequested();
+        return HandleOutcome(plugin, outcome);
+    }
+
+    private Task<object> ShowPluginPage(JsonElement payload)
+    {
+        var pluginId = payload.GetProperty("pluginId").GetString()!;
+        var path = payload.GetProperty("path").GetString()!;
+
+        _plugIn = PlugInRegistry.GetBy(pluginId);
+        _page = PlugInPageRegistry.GetPageFor(pluginId, path)
+            ?? throw new KeyNotFoundException($"Plugin page '{path}' was not found for plugin '{pluginId}'.");
+        return RefreshPluginShell(new { shown = true, layout = _page.Layout.ToString().ToLowerInvariant() });
+    }
+
+    private Task<object> ClearPluginPage()
+    {
+        _plugIn = null;
+        _page = null;
+        return RefreshPluginShell(new { cleared = true });
+    }
+
+    private async Task<object> RefreshPluginShell(object payload)
+    {
+        await InvokeAsync(StateHasChanged);
+        return payload;
+    }
+
+    private object HandleOutcome(LoadedPlugIn plugin, Outcome outcome) => outcome switch
+    {
+        Outcome.Notification notification => new
+        {
+            type = "notification",
+            notification = new
+            {
+                message = notification.Message,
+                description = notification.Description,
+                severity = notification.Type.ToString().ToLowerInvariant(),
+            }
+        },
+        Outcome.PlugInPage page => RegisterPage(plugin, page),
+        _ => new { type = "none" }
+    };
+
+    private object RegisterPage(LoadedPlugIn plugin, Outcome.PlugInPage page)
+    {
+        PlugInPageRegistry.Register(plugin.Id, page);
+        return new
+        {
+            type = "pluginPage",
+            pluginPage = new
+            {
+                pluginId = plugin.Id,
+                path = page.Path,
+                layout = page.Layout.ToString().ToLowerInvariant(),
+                title = page.PageHeader?.Title ?? plugin.Settings.Manifest.PlugInName,
+            }
+        };
+    }
+
+    private Dictionary<string, object?> AssembleComponentParams()
+    {
+        if (_page is null || _plugIn is null) return [];
+
+        return new()
+        {
+            { nameof(PkHexWebPlugInComponent.PlugInSettings), _plugIn.Settings },
+            { nameof(PkHexWebPlugInComponent.Game), GameService.Game },
+            { nameof(PkHexWebPlugInComponent.FileName), GameService.FileName },
+        };
+    }
+
+    private static object SerializePluginSummary(LoadedPlugIn plugin) => new
+    {
+        id = plugin.Id,
+        name = plugin.Settings.Manifest.PlugInName,
+        description = plugin.Settings.Manifest.Description,
+        version = plugin.Version.ToString(),
+        enabled = plugin.Enabled,
+        hasNewerVersion = plugin.HasNewerVersion,
+        projectUrl = plugin.Settings.Manifest.ProjectUrl,
+        publicKeyToken = plugin.PublicKeyToken,
+        sourceId = plugin.SourceId,
+        information = plugin.Settings.Manifest.Information,
+    };
+
+    private static object SerializeSetting(string key, Settings.SettingValue value) => value switch
+    {
+        Settings.SettingValue.StringValue stringValue => new { key, kind = "string", value = stringValue.Value, readOnly = stringValue.ReadOnly },
+        Settings.SettingValue.BooleanValue booleanValue => new { key, kind = "boolean", value = booleanValue.Value, readOnly = booleanValue.ReadOnly },
+        Settings.SettingValue.IntegerValue integerValue => new { key, kind = "integer", value = integerValue.Value, readOnly = integerValue.ReadOnly },
+        Settings.SettingValue.FileValue fileValue => new
+        {
+            key,
+            kind = "file",
+            fileName = fileValue.FileName,
+            hasFile = fileValue.Value.Length > 0,
+            readOnly = fileValue.ReadOnly,
+        },
+        _ => new { key, kind = "unknown" }
+    };
+
+    private static object SerializePokemonSummary(Pokemon pokemon) => new
+    {
+        uniqueId = pokemon.UniqueId.ToString(),
+        species = pokemon.Species.Name,
+        nickname = pokemon.Nickname,
+        displayName = pokemon.NameDisplay(),
+        level = pokemon.Level,
+        shiny = pokemon.IsShiny,
+        gender = pokemon.Gender.Name,
+        heldItem = pokemon.HeldItem.Name,
+        ability = pokemon.Ability.Name,
+        form = pokemon.Form.Form.Name,
+    };
+
+    private static object SerializeStats(Stats stats) => new
+    {
+        hp = stats.Health,
+        atk = stats.Attack,
+        def = stats.Defense,
+        spa = stats.SpecialAttack,
+        spd = stats.SpecialDefense,
+        spe = stats.Speed,
+    };
+
+    private static string HookKind(IPluginHook hook) => hook switch
+    {
+        IQuickAction => "quick-action",
+        IPokemonEditAction => "pokemon-edit-action",
+        IPokemonStatsEditAction => "pokemon-stats-action",
+        IRunOnPokemonChange => "pokemon-change",
+        IRunOnPokemonSave => "pokemon-save",
+        IRunOnItemChanged => "item-change",
+        _ => "hook"
+    };
+
+    public void Dispose()
+    {
+        _reference?.Dispose();
+    }
+
+    private sealed record BridgeRequest(string Command, JsonElement Payload);
+    private sealed record BridgeResponse(bool Success, object? Data, string? Error);
+}
+
+<style>
+    .bridge-shell {
+        min-height: 100vh;
+        background: transparent;
+    }
+
+    .bridge-shell--active {
+        background: var(--bridge-surface, #111827);
+        color: var(--bridge-foreground, #f8fafc);
+    }
+
+    .bridge-standard-shell {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        min-height: 100vh;
+        padding: 1rem;
+        box-sizing: border-box;
+    }
+
+    .bridge-page-header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 1rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid rgb(148 163 184 / 0.2);
+    }
+
+    .bridge-page-eyebrow {
+        font-size: 0.75rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: rgb(148 163 184 / 0.8);
+    }
+
+    .bridge-page-header h1 {
+        margin: 0.25rem 0 0;
+        font-size: 1.5rem;
+    }
+
+    .bridge-page-body {
+        min-height: 0;
+    }
+
+    .bridge-empty-shell {
+        min-height: 100vh;
+    }
+</style>
