@@ -15,6 +15,7 @@ type BridgeEnvelope = {
 type PendingRequest = {
 	resolve: (value: unknown) => void;
 	reject: (reason?: unknown) => void;
+	timeout: ReturnType<typeof window.setTimeout>;
 };
 
 export type BridgeQuickAction = {
@@ -28,6 +29,7 @@ export type BridgeQuickAction = {
 
 export type PokemonSummary = {
 	uniqueId: string;
+	speciesId: number;
 	species: string;
 	nickname: string;
 	displayName: string;
@@ -54,17 +56,110 @@ export type PokemonStats = {
 	spe: number;
 };
 
+export type PokemonTrainerInfo = {
+	currentHandler: 'OriginalTrainer' | 'SomeoneElse';
+	tid: number;
+	sid: number;
+	name: string;
+	gender: string;
+	handlingTrainerName: string;
+	handlingTrainerGender: string;
+};
+
+export type SelectOption = {
+	value: string;
+	label: string;
+};
+
+export type IdNameOption = {
+	id: number;
+	name: string;
+};
+
+export type EncounterSearchResult = {
+	id: number;
+	species: string;
+	version: string;
+	location: string;
+	ball: string;
+	levelRange: string;
+	form: string;
+};
+
+export type EncounterSearchState = {
+	selectedVersionId?: number | null;
+	versions: IdNameOption[];
+	species: IdNameOption[];
+	results: EncounterSearchResult[];
+};
+
 export type PokemonDetails = {
-	source: 'party' | 'box';
+	source: 'party' | 'box' | 'draft';
 	pokemon: PokemonSummary & {
+		pid: string;
+		types: {
+			primary: number;
+			secondary?: number | null;
+		};
 		friendship: number;
 		gameVersion: string;
 		nature: string;
+		heldItemId: number;
+		abilityId: number;
+		formId: number;
+		metBall: string;
+		metBallId: number;
+		metLocation: string;
+		metLocationId: number;
+		metLevel: number;
+		metDate?: string | null;
+		fatefulEncounter: boolean;
+		trainer: PokemonTrainerInfo;
+		legality: {
+			valid: boolean;
+			summary: string;
+			issues: Array<{ code: string; message: string }>;
+		};
 		showdown: string;
-		moves: Array<{ slot: string; name: string; pp: number; maxPp: number }>;
+		moves: Array<{ slot: string; id: number; name: string; typeId: number; isDummied: boolean; pp: number; maxPp: number }>;
 		stats: PokemonStats;
 		evs: PokemonStats;
 		ivs: PokemonStats;
+	};
+	editor: {
+		genders: SelectOption[];
+		natures: SelectOption[];
+		abilities: IdNameOption[];
+		heldItems: IdNameOption[];
+		forms: IdNameOption[];
+		moves: IdNameOption[];
+		balls: IdNameOption[];
+		locations: IdNameOption[];
+	};
+};
+
+export type SavePokemonPayload = {
+	source: 'party' | 'box' | 'draft';
+	uniqueId: string;
+	pokemon: {
+		nickname: string;
+		level: number;
+		shiny: boolean;
+		gender: string;
+		friendship: number;
+		nature: string;
+		heldItemId: number;
+		abilityId: number;
+		formId: number;
+		moveIds: number[];
+		evs: PokemonStats;
+		ivs: PokemonStats;
+		metBallId: number;
+		metLocationId: number;
+		metLevel: number;
+		metDate?: string | null;
+		fatefulEncounter: boolean;
+		trainer: PokemonTrainerInfo;
 	};
 };
 
@@ -77,6 +172,7 @@ export type ItemEntry = {
 export type InventorySnapshot = {
 	type: string;
 	maxItemCountAllowed: number;
+	supportedItems: IdNameOption[];
 	items: ItemEntry[];
 };
 
@@ -100,6 +196,7 @@ export type BridgeSnapshot = {
 		name: string;
 		rivalName?: string | null;
 		money: number;
+		battlePoints?: number | null;
 		gender: string;
 		genderSymbol: string;
 	} | null;
@@ -154,6 +251,15 @@ export type PluginDetails = {
 export type PluginListResult = {
 	installed: PluginSummary[];
 	available: AvailablePlugin[];
+	sources: Array<{
+		sourceUrl: string;
+		sourceManifestUrl: string;
+		name: string;
+		description?: string | null;
+		pluginCount: number;
+		installedCount: number;
+		isDefault: boolean;
+	}>;
 };
 
 export type QuickActionResult =
@@ -176,6 +282,7 @@ class BridgeClient {
 	#ready = false;
 	#readyWaiters: Array<() => void> = [];
 	#listenerAttached = false;
+	#pingInterval: ReturnType<typeof window.setInterval> | null = null;
 
 	constructor() {
 		if (browser) {
@@ -185,15 +292,29 @@ class BridgeClient {
 
 	setFrame(frame: HTMLIFrameElement | null) {
 		this.#frame = frame;
+		this.#ready = false;
+		this.#stopPinging();
 		if (frame && browser) {
 			this.#attachListener();
+			frame.addEventListener('load', () => this.#pingBridge(), { once: true });
+			this.#pingBridge();
 		}
 	}
 
 	async ensureReady() {
 		if (this.#ready) return;
-		await new Promise<void>((resolve) => {
-			this.#readyWaiters.push(resolve);
+		this.#startPinging();
+		await new Promise<void>((resolve, reject) => {
+			const timeout = window.setTimeout(() => {
+				this.#stopPinging();
+				reject(new Error(`Bridge did not become ready at ${this.url}.`));
+			}, 10000);
+
+			this.#readyWaiters.push(() => {
+				window.clearTimeout(timeout);
+				this.#stopPinging();
+				resolve();
+			});
 		});
 	}
 
@@ -207,7 +328,7 @@ class BridgeClient {
 		return snapshot;
 	}
 
-	async updateTrainer(payload: { money: number; gender: string }) {
+	async updateTrainer(payload: { money: number; battlePoints?: number | null; gender: string }) {
 		const snapshot = (await this.#request('updateTrainer', payload)) as BridgeSnapshot;
 		this.#emitStateChanged();
 		return snapshot;
@@ -221,8 +342,53 @@ class BridgeClient {
 		return (await this.#request('getCollection', { source })) as PokemonCollection;
 	}
 
-	async getPokemon(source: 'party' | 'box', uniqueId: string) {
+	async getPokemon(source: 'party' | 'box' | 'draft', uniqueId: string) {
 		return (await this.#request('getPokemon', { source, uniqueId })) as PokemonDetails;
+	}
+
+	async savePokemon(payload: SavePokemonPayload) {
+		const result = (await this.#request('savePokemon', payload)) as PokemonDetails;
+		this.#emitStateChanged();
+		return result;
+	}
+
+	async loadDraftPokemon(fileName: string, base64: string) {
+		return (await this.#request('loadDraftPokemon', { fileName, base64 })) as PokemonDetails;
+	}
+
+	async createCloneDraft(uniqueId: string) {
+		return (await this.#request('createCloneDraft', { uniqueId })) as PokemonDetails;
+	}
+
+	async getDraftPokemon() {
+		return (await this.#request('getDraftPokemon')) as PokemonDetails;
+	}
+
+	async addDraftPokemonToCollection(target: 'party' | 'box') {
+		const result = (await this.#request('addDraftPokemonToCollection', { target })) as {
+			added: boolean;
+			source: 'party' | 'box';
+			uniqueId: string;
+			displayName: string;
+		};
+		this.#emitStateChanged();
+		return result;
+	}
+
+	async clearDraftPokemon() {
+		return (await this.#request('clearDraftPokemon')) as { cleared: boolean };
+	}
+
+	async getEncounterSearch() {
+		return (await this.#request('getEncounterSearch')) as EncounterSearchState;
+	}
+
+	async searchEncounters(versionId: number, speciesId: number) {
+		return (await this.#request('searchEncounters', { versionId, speciesId })) as EncounterSearchState;
+	}
+
+	async createEncounterDraft(encounterId: number) {
+		return (await this.#request('createEncounterDraft', { encounterId })) as PokemonDetails;
 	}
 
 	async exportPokemon(uniqueId: string) {
@@ -234,15 +400,29 @@ class BridgeClient {
 	}
 
 	async setItemCount(inventoryType: string, itemId: number, count: number) {
-		return (await this.#request('setItemCount', { inventoryType, itemId, count })) as ItemsSnapshot;
+		const result = (await this.#request('setItemCount', { inventoryType, itemId, count })) as ItemsSnapshot;
+		this.#emitStateChanged();
+		return result;
 	}
 
 	async getPluginFailures() {
 		return (await this.#request('getPluginFailures')) as { failures: PluginFailure[] };
 	}
 
+	async dismissPluginFailure(pluginId: string, message: string) {
+		return (await this.#request('dismissPluginFailure', { pluginId, message })) as { failures: PluginFailure[] };
+	}
+
 	async getPlugins() {
 		return (await this.#request('getPlugins')) as PluginListResult;
+	}
+
+	async addPluginSource(sourceUrl: string) {
+		return (await this.#request('addPluginSource', { sourceUrl })) as PluginListResult;
+	}
+
+	async removePluginSource(sourceUrl: string) {
+		return (await this.#request('removePluginSource', { sourceUrl })) as PluginListResult;
 	}
 
 	async getPlugin(pluginId: string) {
@@ -327,6 +507,7 @@ class BridgeClient {
 
 			if (data.type === 'ready') {
 				this.#ready = true;
+				this.#stopPinging();
 				for (const resolve of this.#readyWaiters.splice(0)) {
 					resolve();
 				}
@@ -338,6 +519,7 @@ class BridgeClient {
 			const pending = this.#pending.get(data.requestId);
 			if (!pending) return;
 
+			window.clearTimeout(pending.timeout);
 			this.#pending.delete(data.requestId);
 			if (data.success) {
 				pending.resolve(data.data);
@@ -349,6 +531,30 @@ class BridgeClient {
 		this.#listenerAttached = true;
 	}
 
+	#pingBridge() {
+		const frameWindow = this.#frame?.contentWindow;
+		if (!frameWindow) return;
+		frameWindow.postMessage({ channel, type: 'ping' }, '*');
+	}
+
+	#startPinging() {
+		if (this.#pingInterval != null) return;
+		this.#pingBridge();
+		this.#pingInterval = window.setInterval(() => {
+			if (this.#ready) {
+				this.#stopPinging();
+				return;
+			}
+			this.#pingBridge();
+		}, 500);
+	}
+
+	#stopPinging() {
+		if (this.#pingInterval == null) return;
+		window.clearInterval(this.#pingInterval);
+		this.#pingInterval = null;
+	}
+
 	async #request(command: string, payload: Record<string, unknown> = {}) {
 		await this.ensureReady();
 		const frameWindow = this.#frame?.contentWindow;
@@ -358,7 +564,12 @@ class BridgeClient {
 
 		const requestId = `${command}-${this.#requestId++}`;
 		const promise = new Promise<unknown>((resolve, reject) => {
-			this.#pending.set(requestId, { resolve, reject });
+			const timeout = window.setTimeout(() => {
+				this.#pending.delete(requestId);
+				reject(new Error(`Bridge request '${command}' timed out.`));
+			}, 15000);
+
+			this.#pending.set(requestId, { resolve, reject, timeout });
 		});
 
 		frameWindow.postMessage({ channel, type: 'request', requestId, command, payload }, '*');

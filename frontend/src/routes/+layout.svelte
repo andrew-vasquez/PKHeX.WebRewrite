@@ -78,7 +78,6 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} />
-	<link rel="stylesheet" href={`${bridgeBaseUrl}/_content/AntDesign/css/ant-design-blazor.css`} />
 	<script>
 		const theme = localStorage.getItem('theme') === 'dark' ? 'dark' : 'light';
 		document.documentElement.classList.toggle('dark', theme === 'dark');

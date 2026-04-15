@@ -11,6 +11,20 @@ public class PokemonParty(Game game) : IMutablePokemonCollection
         .Select(pkm => new Pokemon(pkm, game))
         .ToList();
 
+    public bool AddOnEmptySlot(Pokemon pokemon)
+    {
+        var openSlot = _partyData
+            .Select((pkm, index) => new { pkm, index })
+            .FirstOrDefault(entry => entry.pkm.Species == 0)?.index ?? -1;
+
+        if (openSlot == -1) return false;
+
+        game.SaveFile.SetPartySlotAtIndex(pokemon.Pkm, openSlot);
+        Commit();
+
+        return true;
+    }
+
     public void Commit()
     {
         try
@@ -29,7 +43,11 @@ public class PokemonParty(Game game) : IMutablePokemonCollection
         var existing = _partyData.FirstOrDefault(p => UniqueId.From(p).Equals(id));
 
         if (existing is null)
-            throw new InvalidOperationException("Adding pokemons to the party is not supported.");
+        {
+            var added = AddOnEmptySlot(pokemon);
+            if (!added) throw new InvalidOperationException("Party is full.");
+            return;
+        }
         
         var index = _partyData.IndexOf(existing);
         _partyData[index] = pokemon.Pkm;

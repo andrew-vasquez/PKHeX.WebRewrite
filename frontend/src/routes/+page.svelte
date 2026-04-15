@@ -16,6 +16,7 @@
 	let busyLabel = $state<string | null>(null);
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let money = $state('0');
+	let battlePoints = $state('0');
 	let gender = $state('Male');
 
 	const demoSaveUrl =
@@ -27,6 +28,7 @@
 
 	function syncTrainerForm(next: BridgeSnapshot | null) {
 		money = `${next?.trainer?.money ?? 0}`;
+		battlePoints = `${next?.trainer?.battlePoints ?? 0}`;
 		gender = next?.trainer?.gender ?? 'Male';
 	}
 
@@ -92,7 +94,11 @@
 	async function saveTrainer() {
 		try {
 			busyLabel = 'Updating trainer';
-			snapshot = await bridgeClient.updateTrainer({ money: Number.parseInt(money, 10) || 0, gender });
+			snapshot = await bridgeClient.updateTrainer({
+				money: Number.parseInt(money, 10) || 0,
+				battlePoints: snapshot?.trainer?.battlePoints == null ? null : Number.parseInt(battlePoints, 10) || 0,
+				gender
+			});
 			notice = 'Trainer values updated in the loaded save.';
 			error = null;
 		} catch (reason) {
@@ -207,6 +213,11 @@
 			<AntDescriptionItem label="Cash">
 				<input class="ant-field" bind:value={money} inputmode="numeric" />
 			</AntDescriptionItem>
+			{#if snapshot.trainer.battlePoints != null}
+				<AntDescriptionItem label="Battle Points">
+					<input class="ant-field" bind:value={battlePoints} inputmode="numeric" />
+				</AntDescriptionItem>
+			{/if}
 			<AntDescriptionItem label="Rival">
 				<input class="ant-field ant-input-readonly" value={snapshot.trainer.rivalName ?? 'N/A'} readonly />
 			</AntDescriptionItem>

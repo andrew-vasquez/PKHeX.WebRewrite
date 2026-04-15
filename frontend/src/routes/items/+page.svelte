@@ -11,7 +11,9 @@
 	let snapshot = $state<ItemsSnapshot | null>(null);
 	let activeType = $state<string>('');
 	let error = $state<string | null>(null);
+	let notice = $state<string | null>(null);
 	let editing: { itemId: number; count: string } | null = $state(null);
+	let adding: { itemId: string; count: string } | null = $state(null);
 
 	onMount(() => {
 		void load();
@@ -40,18 +42,53 @@
 		try {
 			snapshot = await bridgeClient.setItemCount(activeInventory.type, editing.itemId, Number.parseInt(editing.count, 10) || 0);
 			error = null;
+			notice = 'Item updated.';
 		} catch (reason) {
 			error = reason instanceof Error ? reason.message : 'Could not update item count.';
 		} finally {
 			editing = null;
 		}
 	}
+
+	function startAdd() {
+		if (!activeInventory) return;
+		const firstSupported = activeInventory.supportedItems[0];
+		adding = {
+			itemId: firstSupported ? `${firstSupported.id}` : '',
+			count: '1'
+		};
+	}
+
+	async function persistAddedItem() {
+		if (!activeInventory || !adding || !adding.itemId) return;
+		try {
+			snapshot = await bridgeClient.setItemCount(
+				activeInventory.type,
+				Number.parseInt(adding.itemId, 10) || 0,
+				Number.parseInt(adding.count, 10) || 0
+			);
+			error = null;
+			notice = 'Item added.';
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : 'Could not add item.';
+		} finally {
+			adding = null;
+		}
+	}
 </script>
 
-<AntPageHeader title="Items" description="Inventory pouches from the loaded save, with inline count editing instead of the old modal." />
+<AntPageHeader title="Items" description="Inventory pouches from the loaded save, with inline editing and add-item support in the Svelte shell.">
+	{#snippet extra()}
+		<Button variant="primary" onclick={startAdd} disabled={!activeInventory?.supportedItems.length}>Add item</Button>
+	{/snippet}
+</AntPageHeader>
 
 {#if error}
 	<AntAlert tone="error">{error}</AntAlert>
+{/if}
+
+{#if notice}
+	<AntAlert tone="success">{notice}</AntAlert>
 {/if}
 
 {#if snapshot}
@@ -87,6 +124,27 @@
 					<input class="ant-field w-28" bind:value={editing.count} inputmode="numeric" />
 					<Button variant="primary" onclick={persistItem}>Save</Button>
 					<Button variant="default" onclick={() => (editing = null)}>Cancel</Button>
+				</div>
+			</div>
+		{/if}
+
+		{#if adding}
+			<div class="ant-card-shell flex flex-col gap-3 p-4">
+				<div class="space-y-1">
+					<p class="text-sm font-medium text-slate-900 dark:text-slate-50">Add item to {activeInventory.type}</p>
+					<p class="text-xs text-slate-500 dark:text-slate-400">Only items supported by the selected pouch are listed.</p>
+				</div>
+				<div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_8rem_auto]">
+					<select class="ant-field" bind:value={adding.itemId}>
+						{#each activeInventory.supportedItems as item (item.id)}
+							<option value={item.id}>{item.name}</option>
+						{/each}
+					</select>
+					<input class="ant-field" bind:value={adding.count} inputmode="numeric" placeholder="Count" />
+					<div class="flex flex-wrap items-center gap-2">
+						<Button variant="primary" onclick={persistAddedItem}>Add</Button>
+						<Button variant="default" onclick={() => (adding = null)}>Cancel</Button>
+					</div>
 				</div>
 			</div>
 		{/if}

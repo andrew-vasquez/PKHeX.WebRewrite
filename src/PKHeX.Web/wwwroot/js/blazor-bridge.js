@@ -11,11 +11,16 @@
         initialize(ref) {
             bridgeRef = ref;
 
-            post('ready', {});
-
             window.addEventListener('message', async (event) => {
                 const data = event.data;
-                if (!data || data.channel !== channel || data.type !== 'request' || !bridgeRef) return;
+                if (!data || data.channel !== channel || !bridgeRef) return;
+
+                if (data.type === 'ping') {
+                    post('ready', {});
+                    return;
+                }
+
+                if (data.type !== 'request') return;
 
                 try {
                     const responseJson = await bridgeRef.invokeMethodAsync(
@@ -37,6 +42,8 @@
                     });
                 }
             });
+
+            post('ready', {});
         }
     };
 })();

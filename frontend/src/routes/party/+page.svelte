@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import type { PokemonCollection } from '$lib/bridge/client';
 	import { bridgeClient } from '$lib/bridge/client';
 	import AntAlert from '$lib/components/ant/AntAlert.svelte';
@@ -7,6 +8,7 @@
 	import AntTable from '$lib/components/ant/AntTable.svelte';
 	import AntTableRow from '$lib/components/ant/AntTableRow.svelte';
 	import ButtonOrMenu from '$lib/components/pkhex/ButtonOrMenu.svelte';
+	import PokemonSprite from '$lib/components/pkhex/PokemonSprite.svelte';
 	import Button from '$lib/components/ui/Button.svelte';
 
 	let collection = $state<PokemonCollection | null>(null);
@@ -31,7 +33,8 @@
 	}
 
 	let actions = $derived([
-		{ variant: 'primary' as const, label: 'Calculator', onclick: async () => {} },
+		{ variant: 'primary' as const, label: 'Load *.pk', onclick: async () => goto('/pokemon/loaded-file?target=party') },
+		{ variant: 'default' as const, label: 'Add', onclick: async () => goto('/pokemon/search-encounter?target=party') },
 		{ variant: 'link' as const, label: 'Showdown', onclick: copyShowdown }
 	]);
 </script>
@@ -47,8 +50,9 @@
 {/if}
 
 {#if collection}
-	<AntTable columns="md:grid-cols-[minmax(0,1.6fr)_6rem_7rem_8rem_7rem]">
+	<AntTable columns="md:grid-cols-[4.5rem_minmax(0,1.4fr)_6rem_7rem_8rem_7rem]">
 		{#snippet header()}
+			<div>Sprite</div>
 			<div>Name</div>
 			<div>Level</div>
 			<div>Gender</div>
@@ -56,7 +60,8 @@
 			<div>Action</div>
 		{/snippet}
 		{#each collection.entries as pokemon (pokemon.uniqueId)}
-			<AntTableRow columns="md:grid-cols-[minmax(0,1.6fr)_6rem_7rem_8rem_7rem]">
+			<AntTableRow columns="md:grid-cols-[4.5rem_minmax(0,1.4fr)_6rem_7rem_8rem_7rem]">
+				<div class="flex items-center justify-center"><PokemonSprite speciesId={pokemon.speciesId} shiny={pokemon.shiny} alt={pokemon.displayName} size="sm" /></div>
 				<div class="min-w-0">
 					<p class="text-sm text-slate-900 dark:text-slate-50">{pokemon.displayName}</p>
 					<p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{pokemon.heldItem}</p>

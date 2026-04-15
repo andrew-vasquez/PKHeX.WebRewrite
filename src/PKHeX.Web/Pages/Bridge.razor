@@ -4,6 +4,8 @@
 @using PKHeX.Facade
 @using PKHeX.Facade.Extensions
 @using PKHeX.Facade.Pokemons
+@using PKHeX.Core
+@using Gender = PKHeX.Facade.Gender
 @using System.Text.Json
 @using System.Text.Json.Serialization
 @using Microsoft.JSInterop
@@ -16,6 +18,7 @@
 @inject PlugInRuntime PlugInRuntime
 @inject PlugInService PlugInService
 @inject PlugInSourceService PlugInSourceService
+@inject PlugInSourceLocalStorage PlugInSourceLocalStorage
 @inject PlugInLocalStorage PlugInLocalStorage
 @inject PlugInPageRegistry PlugInPageRegistry
 
@@ -58,6 +61,8 @@
     private DotNetObjectReference<Bridge>? _reference;
     private Outcome.PlugInPage? _page;
     private LoadedPlugIn? _plugIn;
+    private Pokemon? _draftPokemon;
+    private List<Encounter> _encounterResults = [];
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -88,11 +93,23 @@
                 "exportSave" => ExportSave(),
                 "getCollection" => GetCollection(request.Payload),
                 "getPokemon" => GetPokemon(request.Payload),
+                "savePokemon" => SavePokemon(request.Payload),
                 "exportPokemon" => ExportPokemon(request.Payload),
+                "loadDraftPokemon" => LoadDraftPokemon(request.Payload),
+                "createCloneDraft" => CreateCloneDraft(request.Payload),
+                "getDraftPokemon" => GetDraftPokemon(),
+                "addDraftPokemonToCollection" => AddDraftPokemonToCollection(request.Payload),
+                "clearDraftPokemon" => ClearDraftPokemon(),
+                "getEncounterSearch" => GetEncounterSearch(),
+                "searchEncounters" => SearchEncounters(request.Payload),
+                "createEncounterDraft" => CreateEncounterDraft(request.Payload),
                 "getItems" => GetItems(),
                 "setItemCount" => SetItemCount(request.Payload),
                 "getPluginFailures" => GetPluginFailures(),
+                "dismissPluginFailure" => DismissPluginFailure(request.Payload),
                 "getPlugins" => GetPlugins(),
+                "addPluginSource" => AddPluginSource(request.Payload),
+                "removePluginSource" => RemovePluginSource(request.Payload),
                 "getPlugin" => GetPlugin(request.Payload),
                 "installPlugin" => InstallPlugin(request.Payload),
                 "uninstallPlugin" => UninstallPlugin(request.Payload),
@@ -130,6 +147,7 @@
                     name = game.Trainer.Name,
                     rivalName = game.Trainer.RivalName,
                     money = game.Trainer.Money.Amount,
+                    battlePoints = game.BattlePoints.IsSupported(out var supported) ? supported.BattlePoints : (int?)null,
                     gender = game.Trainer.Gender.Name,
                     genderSymbol = game.Trainer.Gender.Symbol,
                 },
@@ -154,6 +172,8 @@
         var bytes = Convert.FromBase64String(base64);
 
         GameService.Load(bytes, fileName);
+        _draftPokemon = null;
+        _encounterResults.Clear();
         return GetState();
     }
 
@@ -163,6 +183,11 @@
         if (payload.TryGetProperty("money", out var money) && money.ValueKind == JsonValueKind.Number)
         {
             game.Trainer.Money.Set(money.GetUInt32());
+        }
+
+        if (payload.TryGetProperty("battlePoints", out var battlePoints) && battlePoints.ValueKind == JsonValueKind.Number && game.BattlePoints.IsSupported(out var supported))
+        {
+            supported.BattlePoints = battlePoints.GetInt32();
         }
 
         if (payload.TryGetProperty("gender", out var gender) && gender.ValueKind == JsonValueKind.String)
@@ -214,60 +239,175 @@
     {
         var source = payload.GetProperty("source").GetString() ?? throw new InvalidOperationException("Missing source.");
         var uniqueId = UniqueId.From(payload.GetProperty("uniqueId").GetString() ?? throw new InvalidOperationException("Missing pokemon id."));
-        var game = GameService.LoadedGame;
 
-        var pokemon = source switch
-        {
-            "party" => game.Trainer.Party.Pokemons.FirstOrDefault(p => p.UniqueId.Equals(uniqueId)),
-            "box" => game.Trainer.PokemonBox.All.FirstOrDefault(p => p.UniqueId.Equals(uniqueId)),
-            _ => throw new NotSupportedException($"Collection '{source}' is not supported.")
-        } ?? throw new KeyNotFoundException("Pokemon not found.");
+        var pokemon = FindPokemon(source, uniqueId);
+        return Task.FromResult<object>(SerializePokemonDetails(source, pokemon));
+    }
 
-        return Task.FromResult<object>(new
+    private Task<object> SavePokemon(JsonElement payload)
+    {
+        var source = payload.GetProperty("source").GetString() ?? throw new InvalidOperationException("Missing source.");
+        var uniqueId = UniqueId.From(payload.GetProperty("uniqueId").GetString() ?? throw new InvalidOperationException("Missing pokemon id."));
+        var pokemon = FindPokemon(source, uniqueId);
+        var pokemonPayload = payload.GetProperty("pokemon");
+
+        if (pokemonPayload.TryGetProperty("nickname", out var nickname) && nickname.ValueKind == JsonValueKind.String)
         {
-            source,
-            pokemon = new
+            pokemon.ChangeNickname(nickname.GetString()?.Trim() ?? string.Empty);
+        }
+
+        if (pokemonPayload.TryGetProperty("level", out var level) && level.ValueKind == JsonValueKind.Number)
+        {
+            pokemon.ChangeLevel(level.GetInt32());
+        }
+
+        if (pokemonPayload.TryGetProperty("shiny", out var shiny) && shiny.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            pokemon.SetShiny(shiny.GetBoolean());
+        }
+
+        if (pokemonPayload.TryGetProperty("gender", out var gender) && gender.ValueKind == JsonValueKind.String)
+        {
+            pokemon.Gender = gender.GetString() switch
             {
-                uniqueId = pokemon.UniqueId.ToString(),
-                species = pokemon.Species.Name,
-                nickname = pokemon.Nickname,
-                displayName = pokemon.NameDisplay(),
-                level = pokemon.Level,
-                shiny = pokemon.IsShiny,
-                gender = pokemon.Gender.Name,
-                friendship = pokemon.Friendship,
-                heldItem = pokemon.HeldItem.Name,
-                ability = pokemon.Ability.Name,
-                nature = pokemon.Natures.ToString(),
-                gameVersion = pokemon.Version.Name,
-                form = pokemon.Form.Form.Name,
-                showdown = pokemon.Showdown(),
-                moves = pokemon.Moves.Select(m => new
+                nameof(Gender.Female) or "Female" => Gender.Female,
+                nameof(Gender.Genderless) or "Genderless" => Gender.Genderless,
+                _ => Gender.Male,
+            };
+        }
+
+        if (pokemonPayload.TryGetProperty("trainer", out var trainer) && trainer.ValueKind == JsonValueKind.Object)
+        {
+            if (trainer.TryGetProperty("currentHandler", out var currentHandler) && currentHandler.ValueKind == JsonValueKind.String)
+            {
+                pokemon.Owner.CurrentHandler = currentHandler.GetString() switch
                 {
-                    slot = m.Key.ToString(),
-                    name = m.Value.Move.Name,
-                    pp = m.Value.PP.Current,
-                    maxPp = m.Value.PP.Max,
-                }).ToList(),
-                stats = new
-                {
-                    hp = pokemon.BaseStats.Health,
-                    atk = pokemon.BaseStats.Attack,
-                    def = pokemon.BaseStats.Defense,
-                    spa = pokemon.BaseStats.SpecialAttack,
-                    spd = pokemon.BaseStats.SpecialDefense,
-                    spe = pokemon.BaseStats.Speed,
-                },
-                evs = SerializeStats(pokemon.EVs),
-                ivs = SerializeStats(pokemon.IVs),
+                    nameof(Owner.Handler.SomeoneElse) or "SomeoneElse" => Owner.Handler.SomeoneElse,
+                    _ => Owner.Handler.OriginalTrainer,
+                };
             }
-        });
+
+            if (trainer.TryGetProperty("tid", out var tid) && tid.ValueKind == JsonValueKind.Number)
+                pokemon.Owner.TID = tid.GetUInt32();
+            if (trainer.TryGetProperty("sid", out var sid) && sid.ValueKind == JsonValueKind.Number)
+                pokemon.Owner.SID = sid.GetUInt32();
+            if (trainer.TryGetProperty("name", out var ownerName) && ownerName.ValueKind == JsonValueKind.String)
+                pokemon.Owner.Name = ownerName.GetString() ?? string.Empty;
+            if (trainer.TryGetProperty("gender", out var ownerGender) && ownerGender.ValueKind == JsonValueKind.String)
+                pokemon.Owner.Gender = ownerGender.GetString() switch
+                {
+                    nameof(Gender.Female) or "Female" => Gender.Female,
+                    nameof(Gender.Genderless) or "Genderless" => Gender.Genderless,
+                    _ => Gender.Male,
+                };
+            if (trainer.TryGetProperty("handlingTrainerName", out var handlingTrainerName) && handlingTrainerName.ValueKind == JsonValueKind.String)
+                pokemon.Owner.HandlingTrainerName = handlingTrainerName.GetString() ?? string.Empty;
+            if (trainer.TryGetProperty("handlingTrainerGender", out var handlingTrainerGender) && handlingTrainerGender.ValueKind == JsonValueKind.String)
+                pokemon.Owner.HandlingTrainerGender = handlingTrainerGender.GetString() switch
+                {
+                    nameof(Gender.Female) or "Female" => Gender.Female,
+                    nameof(Gender.Genderless) or "Genderless" => Gender.Genderless,
+                    _ => Gender.Male,
+                };
+        }
+
+        if (pokemonPayload.TryGetProperty("friendship", out var friendship) && friendship.ValueKind == JsonValueKind.Number)
+        {
+            pokemon.Friendship = friendship.GetInt32();
+        }
+
+        if (pokemonPayload.TryGetProperty("nature", out var nature) && nature.ValueKind == JsonValueKind.String)
+        {
+            var rawNature = nature.GetString();
+            if (!Enum.TryParse<Nature>(rawNature, true, out var parsedNature) || !pokemon.Natures.ChangeAll(parsedNature))
+            {
+                throw new InvalidOperationException($"Could not set nature '{rawNature}'.");
+            }
+        }
+
+        if (pokemonPayload.TryGetProperty("heldItemId", out var heldItemId) && heldItemId.ValueKind == JsonValueKind.Number)
+        {
+            pokemon.HeldItem = pokemon.Game.ItemRepository.GetGameItem(heldItemId.GetUInt16());
+        }
+
+        if (pokemonPayload.TryGetProperty("abilityId", out var abilityId) && abilityId.ValueKind == JsonValueKind.Number)
+        {
+            pokemon.Ability = AbilityRepository.Instance.Get(abilityId.GetInt32());
+        }
+
+        if (pokemonPayload.TryGetProperty("formId", out var formId) && formId.ValueKind == JsonValueKind.Number && pokemon.Form.HasForm)
+        {
+            var nextForm = FormRepository.GetFor(pokemon).FirstOrDefault(f => f.Id == formId.GetUInt16());
+            if (nextForm is not null)
+            {
+                pokemon.Form.Form = nextForm;
+            }
+        }
+
+        if (pokemonPayload.TryGetProperty("moveIds", out var moveIds) && moveIds.ValueKind == JsonValueKind.Array)
+        {
+            var nextMoves = moveIds.EnumerateArray().Select(e => e.GetUInt16()).ToArray();
+            if (nextMoves.Length == 4)
+            {
+                pokemon.ChangeMove(PokemonMove.MoveIndex.Move1, MoveRepository.Instance.GetMove(nextMoves[0]));
+                pokemon.ChangeMove(PokemonMove.MoveIndex.Move2, MoveRepository.Instance.GetMove(nextMoves[1]));
+                pokemon.ChangeMove(PokemonMove.MoveIndex.Move3, MoveRepository.Instance.GetMove(nextMoves[2]));
+                pokemon.ChangeMove(PokemonMove.MoveIndex.Move4, MoveRepository.Instance.GetMove(nextMoves[3]));
+            }
+        }
+
+        if (pokemonPayload.TryGetProperty("evs", out var evs) && evs.ValueKind == JsonValueKind.Object)
+        {
+            ApplyStats(pokemon.EVs, evs);
+        }
+
+        if (pokemonPayload.TryGetProperty("ivs", out var ivs) && ivs.ValueKind == JsonValueKind.Object)
+        {
+            ApplyStats(pokemon.IVs, ivs);
+        }
+
+        if (pokemonPayload.TryGetProperty("metBallId", out var metBallId) && metBallId.ValueKind == JsonValueKind.Number)
+        {
+            pokemon.Ball = ItemRepository.GetItem(metBallId.GetUInt16());
+        }
+
+        if (pokemonPayload.TryGetProperty("metLocationId", out var metLocationId) && metLocationId.ValueKind == JsonValueKind.Number)
+        {
+            pokemon.MetConditions.Location = new Location((ushort)metLocationId.GetInt32(), pokemon.Game.LocationRepository.GetBy((ushort)metLocationId.GetInt32()).Name);
+        }
+
+        if (pokemonPayload.TryGetProperty("metLevel", out var metLevel) && metLevel.ValueKind == JsonValueKind.Number)
+        {
+            pokemon.MetConditions.Level = metLevel.GetInt32();
+        }
+
+        if (pokemonPayload.TryGetProperty("metDate", out var metDate) && metDate.ValueKind == JsonValueKind.String)
+        {
+            var rawDate = metDate.GetString();
+            pokemon.MetConditions.Date = string.IsNullOrWhiteSpace(rawDate) ? null : DateOnly.Parse(rawDate!);
+        }
+
+        if (pokemonPayload.TryGetProperty("fatefulEncounter", out var fatefulEncounter) && fatefulEncounter.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            pokemon.MetConditions.FatefulEncounter = fatefulEncounter.GetBoolean();
+        }
+
+        pokemon.Pkm.ResetPartyStats();
+
+        if (pokemon.Pkm is ICombatPower combatPower)
+        {
+            combatPower.ResetCP();
+        }
+
+        return Task.FromResult<object>(SerializePokemonDetails(source, pokemon));
     }
 
     private Task<object> ExportPokemon(JsonElement payload)
     {
         var uniqueId = UniqueId.From(payload.GetProperty("uniqueId").GetString() ?? throw new InvalidOperationException("Missing pokemon id."));
-        var pokemon = GameService.LoadedGame.FindPokemon(uniqueId) ?? throw new KeyNotFoundException("Pokemon not found.");
+        var pokemon = _draftPokemon?.UniqueId.Equals(uniqueId) == true
+            ? _draftPokemon
+            : GameService.LoadedGame.FindPokemon(uniqueId) ?? throw new KeyNotFoundException("Pokemon not found.");
         var file = pokemon.ToFile();
 
         return Task.FromResult<object>(new
@@ -275,6 +415,121 @@
             fileName = file.Name,
             base64 = Convert.ToBase64String(file.Bytes),
         });
+    }
+
+    private Task<object> LoadDraftPokemon(JsonElement payload)
+    {
+        var base64 = payload.GetProperty("base64").GetString() ?? string.Empty;
+        _draftPokemon = Pokemon.LoadFrom(Convert.FromBase64String(base64), GameService.Game);
+        return Task.FromResult<object>(SerializePokemonDetails("draft", _draftPokemon));
+    }
+
+    private Task<object> CreateCloneDraft(JsonElement payload)
+    {
+        var uniqueId = UniqueId.From(payload.GetProperty("uniqueId").GetString() ?? throw new InvalidOperationException("Missing pokemon id."));
+        var pokemon = GameService.LoadedGame.FindPokemon(uniqueId) ?? throw new KeyNotFoundException("Pokemon not found.");
+        _draftPokemon = pokemon.MakeCopy();
+        return Task.FromResult<object>(SerializePokemonDetails("draft", _draftPokemon));
+    }
+
+    private Task<object> GetDraftPokemon()
+    {
+        if (_draftPokemon is null)
+            throw new InvalidOperationException("No draft Pokemon is loaded.");
+
+        return Task.FromResult<object>(SerializePokemonDetails("draft", _draftPokemon));
+    }
+
+    private Task<object> AddDraftPokemonToCollection(JsonElement payload)
+    {
+        if (_draftPokemon is null)
+            throw new InvalidOperationException("No draft Pokemon is loaded.");
+
+        var target = payload.GetProperty("target").GetString() ?? "box";
+        var added = target switch
+        {
+            "party" => GameService.LoadedGame.Trainer.Party.AddOnEmptySlot(_draftPokemon),
+            _ => GameService.LoadedGame.Trainer.PokemonBox.AddOnEmptySlot(_draftPokemon),
+        };
+
+        if (!added)
+            throw new InvalidOperationException(target == "party" ? "Your party is full." : "Your pokemon box is full.");
+
+        var addedPokemon = _draftPokemon;
+        _draftPokemon = null;
+        return Task.FromResult<object>(new
+        {
+            added = true,
+            source = target,
+            uniqueId = addedPokemon.UniqueId.ToString(),
+            displayName = addedPokemon.NameDisplay(),
+        });
+    }
+
+    private Task<object> ClearDraftPokemon()
+    {
+        _draftPokemon = null;
+        return Task.FromResult<object>(new { cleared = true });
+    }
+
+    private Task<object> GetEncounterSearch()
+    {
+        var game = GameService.LoadedGame;
+        var versions = GameVersionRepository.Instance
+            .GetAvailableFor(game.Generation, game.SaveVersion.Version)
+            .OrderBy(version => version.Name)
+            .ToList();
+        var defaultVersion = versions.FirstOrDefault(v => v.Equals(game.GameVersionApproximation)) ?? versions.FirstOrDefault();
+
+        return Task.FromResult<object>(new
+        {
+            selectedVersionId = defaultVersion?.Id,
+            versions = versions.Select(v => new { id = v.Id, name = v.Name }).ToList(),
+            species = game.SpeciesRepository.AllGameSpecies.OrderBy(species => species.Name).Select(species => new { id = species.Id, name = species.Name }).ToList(),
+            results = Array.Empty<object>(),
+        });
+    }
+
+    private Task<object> SearchEncounters(JsonElement payload)
+    {
+        var versionId = payload.GetProperty("versionId").GetInt32();
+        var speciesId = payload.GetProperty("speciesId").GetInt32();
+        var game = GameService.LoadedGame;
+        var versions = GameVersionRepository.Instance
+            .GetAvailableFor(game.Generation, game.SaveVersion.Version)
+            .OrderBy(version => version.Name)
+            .ToList();
+
+        _encounterResults = game.PokemonRepository
+            .FindEncounter((GameVersion)versionId, (Species)speciesId)
+            .ToList();
+
+        return Task.FromResult<object>(new
+        {
+            selectedVersionId = versionId,
+            versions = versions.Select(v => new { id = v.Id, name = v.Name }).ToList(),
+            species = game.SpeciesRepository.AllGameSpecies.OrderBy(species => species.Name).Select(species => new { id = species.Id, name = species.Name }).ToList(),
+            results = _encounterResults.Select((encounter, index) => new
+            {
+                id = index,
+                species = encounter.Species.Name(),
+                version = encounter.Version.Name,
+                location = encounter.Location.Name,
+                ball = encounter.Ball.Name,
+                levelRange = encounter.LevelRange.Format,
+                form = encounter.Form?.Name ?? string.Empty,
+            }).ToList(),
+        });
+    }
+
+    private Task<object> CreateEncounterDraft(JsonElement payload)
+    {
+        var encounterId = payload.GetProperty("encounterId").GetInt32();
+        if (encounterId < 0 || encounterId >= _encounterResults.Count)
+            throw new InvalidOperationException("Encounter not found.");
+
+        _draftPokemon = _encounterResults[encounterId].ConvertToPokemon();
+        return Task.FromResult<object>(SerializePokemonDetails("draft", _draftPokemon));
     }
 
     private Task<object> GetItems()
@@ -287,6 +542,11 @@
             {
                 type,
                 maxItemCountAllowed = inventories[type].MaxItemCountAllowed,
+                supportedItems = inventories[type].CurrentSupportedItems.Select(item => new
+                {
+                    id = item.Id,
+                    name = item.Name,
+                }).OrderBy(item => item.name).ToList(),
                 items = inventories[type].Where(i => !i.IsNone).Select(item => new
                 {
                     id = item.Id,
@@ -325,6 +585,19 @@
         });
     }
 
+    private Task<object> DismissPluginFailure(JsonElement payload)
+    {
+        var pluginId = payload.GetProperty("pluginId").GetString() ?? string.Empty;
+        var message = payload.GetProperty("message").GetString() ?? string.Empty;
+        var failure = PlugInRuntime.RecentFailures.FirstOrDefault(f => f.PlugIn.Id == pluginId && f.Exception.Message == message);
+        if (failure is not null)
+        {
+            PlugInRuntime.Dismiss(failure);
+        }
+
+        return GetPluginFailures();
+    }
+
     private async Task<object> GetPlugins()
     {
         var sources = await PlugInSourceService.GetPlugInSources();
@@ -348,7 +621,53 @@
             })
             .ToList();
 
-        return new { installed, available };
+        var sourceSummaries = sources
+            .Select(source => new
+            {
+                sourceUrl = source.SourceUrl,
+                sourceManifestUrl = source.SourceManifestUrl,
+                name = source.Name,
+                description = source.SourceDescription,
+                pluginCount = source.PlugIns.Length,
+                installedCount = source.PlugIns.Count(plugin => PlugInRegistry.IsRegistered(plugin.Id)),
+                isDefault = source.SourceUrl == PlugInSource.DefaultSourcePath || source.SourceManifestUrl == PlugInSource.DefaultSourceUrl,
+            })
+            .OrderBy(source => source.name)
+            .ToList();
+
+        return new { installed, available, sources = sourceSummaries };
+    }
+
+    private async Task<object> AddPluginSource(JsonElement payload)
+    {
+        var sourceUrl = payload.GetProperty("sourceUrl").GetString()
+                        ?? throw new InvalidOperationException("Missing source url.");
+
+        var normalized = sourceUrl.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+            throw new InvalidOperationException("Source URL cannot be empty.");
+
+        var fetchUrl = normalized.EndsWith(PlugInSource.ManifestFileName, StringComparison.OrdinalIgnoreCase)
+            ? normalized
+            : $"{normalized.TrimEnd('/')}/{PlugInSource.ManifestFileName}";
+
+        var fetched = await PlugInSourceService.FetchFrom(fetchUrl)
+                     ?? throw new InvalidOperationException("Could not fetch a valid plugin source manifest.");
+
+        PlugInSourceLocalStorage.PersistSource(fetched);
+        return await GetPlugins();
+    }
+
+    private async Task<object> RemovePluginSource(JsonElement payload)
+    {
+        var sourceUrl = payload.GetProperty("sourceUrl").GetString()
+                        ?? throw new InvalidOperationException("Missing source url.");
+        var sources = await PlugInSourceService.GetPlugInSources();
+        var source = sources.FirstOrDefault(s => s.SourceUrl == sourceUrl || s.SourceManifestUrl == sourceUrl)
+                     ?? throw new InvalidOperationException("Plugin source not found.");
+
+        PlugInSourceService.Remove(source);
+        return await GetPlugins();
     }
 
     private Task<object> GetPlugin(JsonElement payload)
@@ -560,6 +879,7 @@
     private static object SerializePokemonSummary(Pokemon pokemon) => new
     {
         uniqueId = pokemon.UniqueId.ToString(),
+        speciesId = (int)pokemon.Species.Species,
         species = pokemon.Species.Name,
         nickname = pokemon.Nickname,
         displayName = pokemon.NameDisplay(),
@@ -580,6 +900,158 @@
         spd = stats.SpecialDefense,
         spe = stats.Speed,
     };
+
+    private Pokemon FindPokemon(string source, UniqueId uniqueId)
+    {
+        var game = GameService.LoadedGame;
+        return source switch
+        {
+            "party" => game.Trainer.Party.Pokemons.FirstOrDefault(p => p.UniqueId.Equals(uniqueId)),
+            "box" => game.Trainer.PokemonBox.All.FirstOrDefault(p => p.UniqueId.Equals(uniqueId)),
+            "draft" => _draftPokemon?.UniqueId.Equals(uniqueId) == true ? _draftPokemon : null,
+            _ => throw new NotSupportedException($"Collection '{source}' is not supported.")
+        } ?? throw new KeyNotFoundException("Pokemon not found.");
+    }
+
+    private object SerializePokemonDetails(string source, Pokemon pokemon) => new
+    {
+        source,
+        pokemon = new
+        {
+            uniqueId = pokemon.UniqueId.ToString(),
+            speciesId = (int)pokemon.Species.Species,
+            species = pokemon.Species.Name,
+            nickname = pokemon.Nickname,
+            displayName = pokemon.NameDisplay(),
+            types = new
+            {
+                primary = pokemon.Types.Type1,
+                secondary = pokemon.Types.HasSecondary ? pokemon.Types.Type2 : (int?)null,
+            },
+            level = pokemon.Level,
+            shiny = pokemon.IsShiny,
+            gender = pokemon.Gender.Name,
+            friendship = pokemon.Friendship,
+            heldItem = pokemon.HeldItem.Name,
+            heldItemId = pokemon.HeldItem.Id,
+            ability = pokemon.Ability.Name,
+            abilityId = pokemon.Ability.Id,
+            nature = pokemon.Natures.Nature.ToString(),
+            gameVersion = pokemon.Version.Name,
+            form = pokemon.Form.Form.Name,
+            formId = pokemon.Form.Form.Id,
+            pid = pokemon.PID.ToString("X8"),
+            showdown = pokemon.Showdown(),
+            metBall = pokemon.Ball.Name,
+            metBallId = pokemon.Ball.Id,
+            metLocation = pokemon.MetConditions.Location.Name,
+            metLocationId = pokemon.MetConditions.Location.Id,
+            metLevel = pokemon.MetConditions.Level,
+            metDate = pokemon.MetConditions.Date?.ToString("yyyy-MM-dd"),
+            fatefulEncounter = pokemon.MetConditions.FatefulEncounter,
+            trainer = new
+            {
+                currentHandler = pokemon.Owner.CurrentHandler.ToString(),
+                tid = pokemon.Owner.TID,
+                sid = pokemon.Owner.SID,
+                name = pokemon.Owner.Name,
+                gender = pokemon.Owner.Gender.Name,
+                handlingTrainerName = pokemon.Owner.HandlingTrainerName,
+                handlingTrainerGender = pokemon.Owner.HandlingTrainerGender.Name,
+            },
+            legality = new
+            {
+                valid = pokemon.Legality().Valid,
+                summary = SerializeLegalitySummary(pokemon),
+                issues = SerializeLegalityIssues(pokemon)
+            },
+            moves = pokemon.Moves.Select(m => new
+            {
+                slot = m.Key.ToString(),
+                id = m.Value.Move.Id,
+                name = m.Value.Move.Name,
+                typeId = MoveInfo.GetType(m.Value.Move.Id, pokemon.Game.Generation),
+                isDummied = MoveInfo.IsDummiedMove(pokemon.Pkm, m.Value.Move.Id),
+                pp = m.Value.PP.Current,
+                maxPp = m.Value.PP.Max,
+            }).ToList(),
+            stats = new
+            {
+                hp = pokemon.BaseStats.Health,
+                atk = pokemon.BaseStats.Attack,
+                def = pokemon.BaseStats.Defense,
+                spa = pokemon.BaseStats.SpecialAttack,
+                spd = pokemon.BaseStats.SpecialDefense,
+                spe = pokemon.BaseStats.Speed,
+            },
+            evs = SerializeStats(pokemon.EVs),
+            ivs = SerializeStats(pokemon.IVs),
+        },
+        editor = new
+        {
+            genders = new[]
+            {
+                new { value = "Male", label = "Male" },
+                new { value = "Female", label = "Female" },
+                new { value = "Genderless", label = "Genderless" },
+            },
+            natures = Enum.GetValues<Nature>().Select(n => new { value = n.ToString(), label = n.ToString() }).ToList(),
+            abilities = AbilityRepository.Instance.All.OrderBy(a => a.Name).Select(a => new { id = a.Id, name = a.Name }).ToList(),
+            heldItems = pokemon.Game.ItemRepository.GameItems.OrderBy(i => i.Name).Select(i => new { id = i.Id, name = i.Name }).ToList(),
+            forms = FormRepository.GetFor(pokemon).Select(f => new { id = f.Id, name = string.IsNullOrWhiteSpace(f.Name) ? "Default" : f.Name }).ToList(),
+            moves = MoveRepository.Instance.PossibleMovesFor(pokemon).OrderBy(m => m.Name).Append(MoveDefinition.None).Distinct().Select(m => new { id = m.Id, name = m.Name }).ToList(),
+            balls = ItemRepository.AllBalls().OrderBy(b => b.Name).Select(b => new { id = b.Id, name = b.Name }).ToList(),
+            locations = pokemon.Game.LocationRepository.Locations.OrderBy(location => location.Name).Select(location => new { id = location.Id, name = location.Name }).ToList(),
+        }
+    };
+
+    private static void ApplyStats(Stats stats, JsonElement payload)
+    {
+        if (payload.TryGetProperty("hp", out var hp) && hp.ValueKind == JsonValueKind.Number) stats.Health = hp.GetInt32();
+        if (payload.TryGetProperty("atk", out var atk) && atk.ValueKind == JsonValueKind.Number) stats.Attack = atk.GetInt32();
+        if (payload.TryGetProperty("def", out var def) && def.ValueKind == JsonValueKind.Number) stats.Defense = def.GetInt32();
+        if (payload.TryGetProperty("spa", out var spa) && spa.ValueKind == JsonValueKind.Number) stats.SpecialAttack = spa.GetInt32();
+        if (payload.TryGetProperty("spd", out var spd) && spd.ValueKind == JsonValueKind.Number) stats.SpecialDefense = spd.GetInt32();
+        if (payload.TryGetProperty("spe", out var spe) && spe.ValueKind == JsonValueKind.Number) stats.Speed = spe.GetInt32();
+    }
+
+    private static string SerializeLegalitySummary(Pokemon pokemon)
+    {
+        var analysis = pokemon.Legality();
+        if (analysis.Valid)
+        {
+            return "No invalid checks found.";
+        }
+
+        var invalidChecks = analysis.Results
+            .Where(result => result.Judgement == Severity.Invalid)
+            .Select(result => result.Identifier.ToString())
+            .Distinct()
+            .Take(3)
+            .ToList();
+
+        return invalidChecks.Count == 0
+            ? "Legality checks failed."
+            : string.Join(", ", invalidChecks);
+    }
+
+    private static List<object> SerializeLegalityIssues(Pokemon pokemon)
+    {
+        var analysis = pokemon.Legality();
+        var localization = LegalityLocalizationContext.Create(analysis);
+        var issues = new List<object>();
+
+        foreach (var result in analysis.Results.Where(result => result.Judgement == Severity.Invalid))
+        {
+            issues.Add(new
+            {
+                code = result.Identifier.ToString(),
+                message = localization.Humanize(result)
+            });
+        }
+
+        return issues;
+    }
 
     private static string HookKind(IPluginHook hook) => hook switch
     {

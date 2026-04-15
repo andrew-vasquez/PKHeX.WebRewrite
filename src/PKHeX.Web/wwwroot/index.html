@@ -43,6 +43,32 @@
             }
         })();
     </script>
+
+    <script>
+        window.getWidth = window.getWidth || function () { return window.innerWidth; };
+        window.hasPreferenceForDarkTheme = window.hasPreferenceForDarkTheme || function () {
+            return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        };
+        window.clickElement = window.clickElement || function (element) {
+            if (!(element instanceof HTMLElement)) return;
+            if (element instanceof HTMLInputElement && typeof element.showPicker === 'function') {
+                element.showPicker();
+                return;
+            }
+            element.click();
+        };
+        window.downloadFileFromStream = window.downloadFileFromStream || async function (fileName, contentStreamReference) {
+            const arrayBuffer = await contentStreamReference.arrayBuffer();
+            const blob = new Blob([arrayBuffer]);
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = fileName;
+            anchor.click();
+            anchor.remove();
+            URL.revokeObjectURL(url);
+        };
+    </script>
 </head>
 
 <body>
