@@ -1,0 +1,11 @@
+{
+	"name": "pkhex-webrewrite",
+	"private": true,
+	"packageManager": "pnpm@10.33.0",
+	"scripts": {
+		"dev:all": "concurrently -n frontend,bridge -c cyan,magenta \"pnpm --dir frontend dev\" \"dotnet run --project src/PKHeX.Web/PKHeX.Web.csproj\""
+	},
+	"devDependencies": {
+		"concurrently": "^9.2.1"
+	}
+}

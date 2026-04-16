@@ -19,11 +19,15 @@
 	let primaryNavItems = [
 		{ href: '/', label: 'Home' },
 		{ href: '/plugins', label: 'Plug-ins' },
+		{ href: '/plugins/errors', label: 'Plug-in Errors' },
+		{ href: '/analytics', label: 'Analytics' },
+		{ href: '/cloud/pokemon', label: 'Cloud' },
 		{ href: '/settings', label: 'Settings' }
 	];
 	let loadedNavItems = [
 		{ href: '/party', label: 'Party' },
 		{ href: '/pokemon-box', label: 'Box' },
+		{ href: '/pokemon/search-encounter', label: 'Encounter Search' },
 		{ href: '/items', label: 'Items' },
 		{ href: '/save', label: 'Export' }
 	];

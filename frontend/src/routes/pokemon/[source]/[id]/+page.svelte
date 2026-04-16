@@ -4,6 +4,16 @@
 	import { goto } from '$app/navigation';
 	import type { PokemonDetails, PokemonStats, SavePokemonPayload } from '$lib/bridge/client';
 	import { bridgeClient } from '$lib/bridge/client';
+	import {
+		clearSyncedCloudId,
+		getCloudPokemon,
+		getSyncedCloudId,
+		removeCloudPokemon,
+		setCloudAllowDownload,
+		setCloudPublic,
+		uploadCloudPokemon,
+		type CloudPokemonMetadata
+	} from '$lib/cloud-sync';
 	import AntAlert from '$lib/components/ant/AntAlert.svelte';
 	import AntDescriptionItem from '$lib/components/ant/AntDescriptionItem.svelte';
 	import AntDescriptions from '$lib/components/ant/AntDescriptions.svelte';
@@ -23,6 +33,8 @@
 	let error = $state<string | null>(null);
 	let notice = $state<string | null>(null);
 	let saving = $state(false);
+	let cloudBusy = $state<string | null>(null);
+	let cloudMetadata = $state<CloudPokemonMetadata | null>(null);
 	let activeTab = $state<Tab>('description');
 
 	let source = $derived(page.params.source as 'party' | 'box' | 'draft');
@@ -70,6 +82,12 @@
 	function applyDetails(next: PokemonDetails) {
 		details = next;
 		draft = createDraft(next);
+		void refreshCloudState(next.pokemon.uniqueId);
+	}
+
+	function base64ToBytes(base64: string) {
+		const binary = atob(base64);
+		return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 	}
 
 	async function load() {
@@ -99,11 +117,86 @@
 				}
 			});
 			applyDetails(next);
+			if (cloudMetadata) {
+				await syncCloud(next.pokemon.uniqueId, false);
+			}
 			notice = `${next.pokemon.displayName} saved.`;
 		} catch (reason) {
 			error = reason instanceof Error ? reason.message : 'Could not save Pokemon changes.';
 		} finally {
 			saving = false;
+		}
+	}
+
+	async function refreshCloudState(localUniqueId: string) {
+		const cloudId = getSyncedCloudId(localUniqueId);
+		if (!cloudId) {
+			cloudMetadata = null;
+			return;
+		}
+
+		try {
+			cloudMetadata = await getCloudPokemon(cloudId);
+		} catch {
+			clearSyncedCloudId(localUniqueId);
+			cloudMetadata = null;
+		}
+	}
+
+	async function syncCloud(localUniqueId: string, showNotice = true) {
+		if (!details) return;
+		try {
+			cloudBusy = 'Syncing Pokemon';
+			error = null;
+			const exported = await bridgeClient.exportPokemon(details.pokemon.uniqueId);
+			cloudMetadata = await uploadCloudPokemon(localUniqueId, base64ToBytes(exported.base64), exported.fileName);
+			if (showNotice) {
+				notice = `${details.pokemon.displayName} synced to cloud.`;
+			}
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : 'Could not sync Pokemon to cloud.';
+		} finally {
+			cloudBusy = null;
+		}
+	}
+
+	async function unsyncCloud(localUniqueId: string) {
+		if (!cloudMetadata) return;
+		try {
+			cloudBusy = 'Removing cloud sync';
+			await removeCloudPokemon(localUniqueId, cloudMetadata.id);
+			cloudMetadata = null;
+			notice = 'Cloud sync removed.';
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : 'Could not remove cloud sync.';
+		} finally {
+			cloudBusy = null;
+		}
+	}
+
+	async function updateCloudPublic(value: boolean) {
+		if (!cloudMetadata || !details) return;
+		try {
+			cloudBusy = value ? 'Making Pokemon public' : 'Making Pokemon private';
+			await setCloudPublic(cloudMetadata.id, value);
+			await refreshCloudState(details.pokemon.uniqueId);
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : 'Could not update public status.';
+		} finally {
+			cloudBusy = null;
+		}
+	}
+
+	async function updateCloudAllowDownload(value: boolean) {
+		if (!cloudMetadata || !details) return;
+		try {
+			cloudBusy = value ? 'Allowing downloads' : 'Disabling downloads';
+			await setCloudAllowDownload(cloudMetadata.id, value);
+			await refreshCloudState(details.pokemon.uniqueId);
+		} catch (reason) {
+			error = reason instanceof Error ? reason.message : 'Could not update download setting.';
+		} finally {
+			cloudBusy = null;
 		}
 	}
 
@@ -185,9 +278,13 @@
 	<AntAlert tone="error">{error}</AntAlert>
 {/if}
 
-{#if notice}
-	<AntAlert tone="success">{notice}</AntAlert>
-{/if}
+	{#if notice}
+		<AntAlert tone="success">{notice}</AntAlert>
+	{/if}
+
+	{#if cloudBusy}
+		<AntAlert tone="info">{cloudBusy}...</AntAlert>
+	{/if}
 
 {#if details && draft}
 	<section class="grid gap-6 xl:grid-cols-[12rem_minmax(0,1fr)]">
@@ -426,14 +523,38 @@
 		</Panel>
 	{/if}
 
-	<Panel title="Cloud" description="Cloud sync and public sharing still depend on the existing backend API flows. The Svelte shell keeps the route surface, while sync-heavy toggles remain a follow-up parity pass.">
-		<div class="space-y-3 text-sm text-slate-600 dark:text-slate-300">
-			<p>Current source: <span class="text-slate-900 dark:text-slate-100">{source}</span></p>
-			<p>Use the cloud pages when the backend API is running and authenticated.</p>
-			<div class="flex flex-wrap gap-3">
-				<Button variant="default" href="/cloud/pokemon">Open cloud list</Button>
-				<Button variant="default" href="/plugins">Plug-in sync tools</Button>
-			</div>
+	<Panel title="Cloud" description="Sync this Pokemon to the backend API, then control public sharing and downloads from the Svelte editor.">
+		<div class="space-y-4 text-sm text-slate-600 dark:text-slate-300">
+			{#if cloudMetadata}
+				<AntDescriptions>
+					<AntDescriptionItem label="Synced">Yes</AntDescriptionItem>
+					<AntDescriptionItem label="Public">
+						<div class="flex items-center gap-3">
+							<Switch checked={cloudMetadata.isPublic} onchange={updateCloudPublic} />
+							<span>{cloudMetadata.isPublic ? 'Visible to others' : 'Private'}</span>
+						</div>
+					</AntDescriptionItem>
+					<AntDescriptionItem label="Allow Download">
+						<div class="flex items-center gap-3">
+							<Switch checked={cloudMetadata.allowDownload} disabled={!cloudMetadata.isPublic} onchange={updateCloudAllowDownload} />
+							<span>{cloudMetadata.allowDownload ? 'Download enabled' : 'Download disabled'}</span>
+						</div>
+					</AntDescriptionItem>
+					<AntDescriptionItem label="Uploaded">{new Date(cloudMetadata.uploadedAtUtc).toLocaleString()}</AntDescriptionItem>
+					<AntDescriptionItem label="Last Synced">{new Date(cloudMetadata.lastSyncedAt).toLocaleString()}</AntDescriptionItem>
+				</AntDescriptions>
+				<div class="flex flex-wrap gap-3">
+					<Button variant="default" href={`/cloud/pokemon/${cloudMetadata.id}`}>Open cloud page</Button>
+					<Button variant="default" onclick={() => syncCloud(details!.pokemon.uniqueId)}>Sync now</Button>
+					<Button variant="danger" onclick={() => unsyncCloud(details!.pokemon.uniqueId)}>Unsync</Button>
+				</div>
+			{:else}
+				<p>This Pokemon is not synced yet.</p>
+				<div class="flex flex-wrap gap-3">
+					<Button variant="primary" onclick={() => syncCloud(details!.pokemon.uniqueId)}>Sync to cloud</Button>
+					<Button variant="default" href="/cloud/pokemon">Open cloud list</Button>
+				</div>
+			{/if}
 		</div>
 	</Panel>
 {/if}

@@ -7,6 +7,13 @@ export default defineConfig({
 	server: {
 		fs: {
 			allow: ['..']
+		},
+		proxy: {
+			'/backend-api': {
+				target: 'http://localhost:5031',
+				changeOrigin: true,
+				rewrite: (path) => path.replace(/^\/backend-api/, '')
+			}
 		}
 	}
 });
